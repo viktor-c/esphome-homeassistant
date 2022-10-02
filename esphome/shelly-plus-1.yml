@@ -1,0 +1,216 @@
+# based on template found at https://www.esphome-devices.com/devices/Shelly-1
+# license Gnu GPLv3
+
+# shelly plus 1 uses esp32; 
+# this template creates a setup with a (push)button which can send a single, double and long press as event to esphome; 
+# it works in detached mode, meaning it will only trigger the relay if no wifi and no api connection to homeassistant is possible
+# please set following secrets, can be empty
+# wifi_ssid, wifi_password, api_password, api_encryption_key, ota_password, ap_fallback_password
+
+#shelly plus 1 
+#GPIO04	Switch_n 1
+#GPIO26	Relay 1
+#GPIO0  led output
+#GPIO25 physical button on the back
+
+substitutions:
+  #this could be a number or the location tag of the Shelly1P; don't use dash or special characters
+  shelly1P_tag: "03"
+  #
+  # there should be no need to change further variables
+  #
+  device_name: "ShellyPlus1-${shelly1P_tag}"
+  #short name shows up in the list of integrations
+  device_name_short: "shelly-p1-${shelly1P_tag}"
+  device_id: "shellyp1_${shelly1P_tag}"
+  wifi_sensor_update_interval: "60s" # WiFi Signal sensor.
+  # Higher value gives lower watt readout
+  current_res: "0.001"
+  # Lower value gives lower voltage readout
+  voltage_div: "1925"
+
+esphome:
+  name: ${device_name_short}
+  platformio_options:
+    board_build.f_cpu: 160000000L
+
+esp32:
+  board: esp32doit-devkit-v1
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      CONFIG_FREERTOS_UNICORE: y
+      CONFIG_ESP32_DEFAULT_CPU_FREQ_160: y
+      CONFIG_ESP32_DEFAULT_CPU_FREQ_MHZ: "160"
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+ 
+  ap:
+    ssid: "${device_name} fallback ap"
+    password: !secret ap_fallback_password
+   
+logger:
+
+api:
+  password: !secret api_password
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  password: !secret ota_password
+
+output:
+  - platform: gpio
+    id: "relay_output"
+    pin: GPIO26
+
+
+# Text sensors with general information.
+text_sensor:
+  # Expose ESPHome version as sensor.
+  - platform: version
+    name: ${device_name} ESPHome Version
+  # Expose WiFi information as sensors.
+  - platform: wifi_info
+    ip_address:
+      name: ${device_name} IP
+    ssid:
+      name: ${device_name} SSID
+    bssid:
+      name: ${device_name} BSSID
+
+# Sensors with general information.
+sensor:
+  # Uptime sensor.
+  - platform: uptime
+    name: ${device_name} Uptime
+
+  # WiFi Signal sensor.
+  - platform: wifi_signal
+    name: ${device_name} WiFi Signal
+    update_interval: ${wifi_sensor_update_interval}
+
+  - platform: ntc
+    sensor: temp_resistance_reading
+    name: "${device_name} Temperature"
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    icon: "mdi:thermometer"
+    calibration:
+      b_constant: 3350
+      reference_resistance: 10kOhm
+      reference_temperature: 298.15K
+    on_value_range:
+      - above: "80.0"
+        then:
+          - switch.turn_off: "shelly_p1_relay"
+  - platform: resistance
+    id: temp_resistance_reading
+    sensor: temp_analog_reading
+    configuration: DOWNSTREAM
+    resistor: 10kOhm
+  - platform: adc
+    id: temp_analog_reading
+    pin: GPIO32
+    attenuation: 11db
+
+  - platform: adc
+    name: "${device_name} Relay Supply Voltage"
+    pin: GPIO33
+    attenuation: 11db
+    filters:
+      - multiply: 8
+
+# Shelly plus 1 detached switch config with multi click options and fallback in case of wifi or api fail
+switch:
+  - platform: gpio
+    name: ${device_name} Relay
+    pin: GPIO26
+    id: shelly_p1_relay
+    restore_mode: restore_default_off
+
+button:
+  - platform: template
+    name: "${device_name} taster"
+    id: taster
+
+binary_sensor:
+  - platform: gpio
+    name: ${device_name} Taster
+    pin: GPIO4
+    # internal: true
+    id: "${device_id}_taster"
+    # config for multi click actions
+    on_multi_click:
+      # double click
+      - timing:
+          - ON for at most 1s
+          - OFF for at most 1s
+          - ON for at most 1s
+          - OFF for at least 0.2s
+        then:
+          - if:
+              condition:
+                and:
+                  - wifi.connected:
+                  - api.connected:
+              # send double click event in case wifi and api are conncected
+              then:
+                - logger.log: "shelly ${device_name} double click"
+                - homeassistant.event:
+                    event: esphome.button_pressed
+                    data:
+                      device_id: ${device_id}_taster
+                      command: remote_button_double_press
+              # toggle relay in case either wifi or api are not connected
+              else:
+                - switch.toggle: shelly_p1_relay
+        # long click
+        # after releasing the button, firmware sends a message "state OFF"
+      - timing:
+          - ON for at least 1.5s
+        then:
+          - if:
+              condition:
+                and:
+                  - wifi.connected:
+                  - api.connected:
+              # send long click event in case wifi and api are conncected
+              then:
+                - logger.log: "shelly ${device_name} long click"
+                - homeassistant.event:
+                    event: esphome.button_pressed
+                    data:
+                      device_id: ${device_id}_taster
+                      command: remote_button_long_press
+              # toggle relay in case either wifi or api are not connected
+              else:
+                - switch.toggle: shelly_p1_relay
+        # single click
+      - timing:
+          - ON for at most 1s
+          - OFF for at least 0.5s
+        then:
+          - if:
+              condition:
+                and:
+                  - wifi.connected:
+                  - api.connected:
+              # send single click event in case wifi and api are conncected
+              then:
+                - logger.log: "shelly ${device_name} short click"
+                - homeassistant.event:
+                    event: esphome.button_pressed
+                    data:
+                      device_id: ${device_id}_taster
+                      command: remote_button_short_press
+              # toggle relay in case either wifi or api are not connected
+              else:
+                - switch.toggle: shelly_p1_relay
+
+status_led:
+  pin:
+    number: GPIO0
+    inverted: true
